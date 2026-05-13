@@ -5,6 +5,7 @@ use hbb_common::{
 use ini::Ini;
 use sodiumoxide::crypto::sign;
 use std::{
+    collections::HashSet,
     io::prelude::*,
     io::Read,
     net::SocketAddr,
@@ -152,6 +153,26 @@ pub fn gen_sk(wait: u64) -> (String, Option<sign::SecretKey>) {
         }
     }
     ("".to_owned(), None)
+}
+
+pub fn load_whitelist(path: &str) -> HashSet<String> {
+    let mut whitelist = HashSet::new();
+    if path.is_empty() {
+        return whitelist;
+    }
+    if let Ok(mut file) = std::fs::File::open(path) {
+        let mut contents = String::new();
+        if file.read_to_string(&mut contents).is_ok() {
+            for x in contents.split('\n') {
+                let id = x.trim().split(' ').next().unwrap_or("");
+                if !id.is_empty() && !id.starts_with('#') {
+                    whitelist.insert(id.to_owned());
+                }
+            }
+        }
+    }
+    log::info!("#whitelist({}): {}", path, whitelist.len());
+    whitelist
 }
 
 #[cfg(unix)]

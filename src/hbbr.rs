@@ -15,6 +15,7 @@ fn main() -> ResultType<()> {
     let args = format!(
         "-p, --port=[NUMBER(default={RELAY_PORT})] 'Sets the listening port'
         -k, --key=[KEY] 'Only allow the client with the same key'
+        -w, --whitelist=[FILE] 'Sets the client ID whitelist file'
         ",
     );
     let matches = App::new("hbbr")
@@ -40,6 +41,9 @@ fn main() -> ResultType<()> {
         matches
             .value_of("key")
             .unwrap_or(&std::env::var("KEY").unwrap_or_default()),
+        matches
+            .value_of("whitelist")
+            .unwrap_or(&std::env::var("WHITELIST").unwrap_or_default()),
     )?;
     Ok(())
 }

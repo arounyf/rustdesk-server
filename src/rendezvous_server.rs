@@ -33,7 +33,7 @@ use hbb_common::{
 use ipnetwork::Ipv4Network;
 use sodiumoxide::crypto::sign;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::Arc,
@@ -88,6 +88,7 @@ pub struct RendezvousServer {
     relay_servers0: Arc<RelayServers>,
     rendezvous_servers: Arc<Vec<String>>,
     inner: Arc<Inner>,
+    whitelist: Arc<HashSet<String>>,
 }
 
 enum LoopFailure {
@@ -99,7 +100,7 @@ enum LoopFailure {
 
 impl RendezvousServer {
     #[tokio::main(flavor = "multi_thread")]
-    pub async fn start(port: i32, serial: i32, key: &str, rmem: usize) -> ResultType<()> {
+    pub async fn start(port: i32, serial: i32, key: &str, rmem: usize, whitelist: HashSet<String>) -> ResultType<()> {
         let (key, sk) = Self::get_server_sk(key);
         let nat_port = port - 1;
         let ws_port = port + 2;
@@ -142,6 +143,7 @@ impl RendezvousServer {
                 mask,
                 local_ip,
             }),
+            whitelist: Arc::new(whitelist),
         };
         log::info!("mask: {:?}", rs.inner.mask);
         log::info!("local-ip: {:?}", rs.inner.local_ip);
@@ -326,6 +328,14 @@ impl RendezvousServer {
                 Some(rendezvous_message::Union::RegisterPeer(rp)) => {
                     // B registered
                     if !rp.id.is_empty() {
+                        let is_internal = rp.id.starts_with("(:") && rp.id.ends_with(":)");
+                        if !self.whitelist.is_empty() && !is_internal && !self.whitelist.contains(&rp.id) {
+                            log::warn!("Whitelist: registration DENIED for peer {} from {} ({} IDs loaded)", rp.id, addr, self.whitelist.len());
+                            return Ok(());
+                        }
+                        if !self.whitelist.is_empty() && !is_internal {
+                            log::info!("Whitelist: registration ALLOWED for peer {} from {}", rp.id, addr);
+                        }
                         log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
                         self.update_addr(rp.id, addr, socket).await?;
                         if self.inner.serial > rp.serial {
@@ -695,6 +705,29 @@ impl RendezvousServer {
                 ..Default::default()
             });
             return Ok((msg_out, None));
+        }
+        if !self.whitelist.is_empty() {
+            if !self.whitelist.contains(&ph.id) {
+                log::warn!("Whitelist: punch hole DENIED from {} for target {} - target not in whitelist ({} IDs loaded)", addr, ph.id, self.whitelist.len());
+                let mut msg_out = RendezvousMessage::new();
+                msg_out.set_punch_hole_response(PunchHoleResponse {
+                    failure: punch_hole_response::Failure::ID_NOT_EXIST.into(),
+                    ..Default::default()
+                });
+                return Ok((msg_out, None));
+            }
+            if !ph.source_id.is_empty() && !self.whitelist.contains(&ph.source_id) {
+                log::warn!("Whitelist: punch hole DENIED from {} (source={}) for target {} - source not in whitelist ({} IDs loaded)", addr, ph.source_id, ph.id, self.whitelist.len());
+                let mut msg_out = RendezvousMessage::new();
+                msg_out.set_punch_hole_response(PunchHoleResponse {
+                    failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
+                    ..Default::default()
+                });
+                return Ok((msg_out, None));
+            }
+            if !ph.source_id.is_empty() {
+                log::info!("Whitelist: punch hole ALLOWED from {} (source={}) to {}", addr, ph.source_id, ph.id);
+            }
         }
         let id = ph.id;
         // punch hole request from A, relay to B,
