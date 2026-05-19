@@ -33,7 +33,7 @@ use hbb_common::{
 use ipnetwork::Ipv4Network;
 use sodiumoxide::crypto::sign;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::Arc,
@@ -68,6 +68,8 @@ use tokio::sync::Mutex as TokioMutex; // differentiate if needed
 struct PunchReqEntry { tm: Instant, from_ip: String, to_ip: String, to_id: String }
 static PUNCH_REQS: Lazy<TokioMutex<Vec<PunchReqEntry>>> = Lazy::new(|| TokioMutex::new(Vec::new()));
 const PUNCH_REQ_DEDUPE_SEC: u64 = 60;
+static DENIED_LOG: Lazy<TokioMutex<HashMap<String, Instant>>> = Lazy::new(|| TokioMutex::new(HashMap::new()));
+const DENIED_LOG_DEDUPE_SEC: u64 = 30;
 
 #[derive(Clone)]
 struct Inner {
@@ -88,7 +90,8 @@ pub struct RendezvousServer {
     relay_servers0: Arc<RelayServers>,
     rendezvous_servers: Arc<Vec<String>>,
     inner: Arc<Inner>,
-    whitelist: Arc<HashSet<String>>,
+    whitelist: Arc<TokioMutex<crate::common::Whitelist>>,
+    whitelist_path: Arc<String>,
 }
 
 enum LoopFailure {
@@ -100,7 +103,7 @@ enum LoopFailure {
 
 impl RendezvousServer {
     #[tokio::main(flavor = "multi_thread")]
-    pub async fn start(port: i32, serial: i32, key: &str, rmem: usize, whitelist: HashSet<String>) -> ResultType<()> {
+    pub async fn start(port: i32, serial: i32, key: &str, rmem: usize, whitelist: crate::common::Whitelist, whitelist_path: String) -> ResultType<()> {
         let (key, sk) = Self::get_server_sk(key);
         let nat_port = port - 1;
         let ws_port = port + 2;
@@ -143,7 +146,8 @@ impl RendezvousServer {
                 mask,
                 local_ip,
             }),
-            whitelist: Arc::new(whitelist),
+            whitelist: Arc::new(TokioMutex::new(whitelist)),
+            whitelist_path: Arc::new(whitelist_path),
         };
         log::info!("mask: {:?}", rs.inner.mask);
         log::info!("local-ip: {:?}", rs.inner.local_ip);
@@ -239,6 +243,12 @@ impl RendezvousServer {
         socket: &mut FramedSocket,
         key: &str,
     ) -> LoopFailure {
+        let whitelist_path = self.whitelist_path.clone();
+        let whitelist = self.whitelist.clone();
+        let pm = self.pm.clone();
+        if !whitelist_path.is_empty() {
+            tokio::spawn(reload_listener(whitelist_path, whitelist, pm));
+        }
         let mut timer_check_relay = interval(Duration::from_millis(CHECK_RELAY_TIMEOUT));
         loop {
             tokio::select! {
@@ -329,12 +339,23 @@ impl RendezvousServer {
                     // B registered
                     if !rp.id.is_empty() {
                         let is_internal = rp.id.starts_with("(:") && rp.id.ends_with(":)");
-                        if !self.whitelist.is_empty() && !is_internal && !self.whitelist.contains(&rp.id) {
-                            log::warn!("Whitelist: registration DENIED for peer {} from {} ({} IDs loaded)", rp.id, addr, self.whitelist.len());
+                        let wl = self.whitelist.lock().await;
+                        let denied = !wl.is_empty() && !is_internal && !crate::common::check_whitelist(&wl, &rp.id);
+                        drop(wl);
+                        if denied {
+                            let mut dedup = DENIED_LOG.lock().await;
+                            if dedup.get(&rp.id).map_or(true, |t| t.elapsed().as_secs() >= DENIED_LOG_DEDUPE_SEC) {
+                                log::warn!("Whitelist: registration DENIED for peer {}", rp.id);
+                                dedup.insert(rp.id.clone(), Instant::now());
+                            }
                             return Ok(());
                         }
-                        if !self.whitelist.is_empty() && !is_internal {
-                            log::info!("Whitelist: registration ALLOWED for peer {} from {}", rp.id, addr);
+                        if !self.whitelist_path.is_empty() && !is_internal {
+                            let mut seen = DENIED_LOG.lock().await;
+                            if seen.get(&rp.id).map_or(true, |t| t.elapsed().as_secs() >= 60) {
+                                log::info!("Whitelist: registration ALLOWED for peer {}", rp.id);
+                                seen.insert(rp.id.clone(), Instant::now());
+                            }
                         }
                         log::trace!("New peer registered: {:?} {:?}", &rp.id, &addr);
                         self.update_addr(rp.id, addr, socket).await?;
@@ -706,9 +727,15 @@ impl RendezvousServer {
             });
             return Ok((msg_out, None));
         }
-        if !self.whitelist.is_empty() {
-            if !self.whitelist.contains(&ph.id) {
-                log::warn!("Whitelist: punch hole DENIED from {} for target {} - target not in whitelist ({} IDs loaded)", addr, ph.id, self.whitelist.len());
+        let wl = self.whitelist.lock().await;
+        if !wl.is_empty() {
+            if !crate::common::check_whitelist(&wl, &ph.id) {
+                let mut dedup = DENIED_LOG.lock().await;
+                if dedup.get(&ph.id).map_or(true, |t| t.elapsed().as_secs() >= DENIED_LOG_DEDUPE_SEC) {
+                    log::warn!("Whitelist: punch hole DENIED for target {}", ph.id);
+                    dedup.insert(ph.id.clone(), Instant::now());
+                }
+                drop(wl);
                 let mut msg_out = RendezvousMessage::new();
                 msg_out.set_punch_hole_response(PunchHoleResponse {
                     failure: punch_hole_response::Failure::ID_NOT_EXIST.into(),
@@ -716,8 +743,13 @@ impl RendezvousServer {
                 });
                 return Ok((msg_out, None));
             }
-            if !ph.source_id.is_empty() && !self.whitelist.contains(&ph.source_id) {
-                log::warn!("Whitelist: punch hole DENIED from {} (source={}) for target {} - source not in whitelist ({} IDs loaded)", addr, ph.source_id, ph.id, self.whitelist.len());
+            if !ph.source_id.is_empty() && !crate::common::check_whitelist(&wl, &ph.source_id) {
+                let mut dedup = DENIED_LOG.lock().await;
+                if dedup.get(&ph.source_id).map_or(true, |t| t.elapsed().as_secs() >= DENIED_LOG_DEDUPE_SEC) {
+                    log::warn!("Whitelist: punch hole DENIED for source {}", ph.source_id);
+                    dedup.insert(ph.source_id.clone(), Instant::now());
+                }
+                drop(wl);
                 let mut msg_out = RendezvousMessage::new();
                 msg_out.set_punch_hole_response(PunchHoleResponse {
                     failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
@@ -725,10 +757,8 @@ impl RendezvousServer {
                 });
                 return Ok((msg_out, None));
             }
-            if !ph.source_id.is_empty() {
-                log::info!("Whitelist: punch hole ALLOWED from {} (source={}) to {}", addr, ph.source_id, ph.id);
-            }
         }
+        drop(wl);
         let id = ph.id;
         // punch hole request from A, relay to B,
         // check if in same intranet first,
@@ -1083,12 +1113,15 @@ impl RendezvousServer {
             Some("punch-requests" | "pr") => {
                 use std::fmt::Write as _;
                 let mut lock = PUNCH_REQS.lock().await;
+                // retain only recent (optional cleanup older than a day)
+                lock.retain(|e| e.tm.elapsed().as_secs() < 24*3600);
                 let arg = fds.next();
                 if let Some("-") = arg { lock.clear(); }
                 else {
                     let mut start = arg.and_then(|x| x.parse::<usize>().ok()).unwrap_or(0);
                     let mut page_size = fds.next().and_then(|x| x.parse::<usize>().ok()).unwrap_or(10);
                     if page_size == 0 { page_size = 10; }
+                    if start >= lock.len() { start = 0; }
                     for (_, e) in lock.iter().enumerate().skip(start).take(page_size) {
                         let age = e.tm.elapsed();
                         let event_system = std::time::SystemTime::now() - age;
@@ -1329,6 +1362,28 @@ async fn check_relay_servers(rs0: Arc<RelayServers>, tx: Sender) {
     let rs = std::mem::take(&mut *rs.lock().await);
     if !rs.is_empty() {
         tx.send(Data::RelayServers(rs)).ok();
+    }
+}
+
+async fn reload_listener(path: Arc<String>, whitelist: Arc<TokioMutex<crate::common::Whitelist>>, pm: crate::peer::PeerMap) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:21120").await;
+    if let Err(ref e) = listener {
+        log::error!("Whitelist reload listener bind failed: {}", e);
+        return;
+    }
+    log::info!("Whitelist reload listener on 127.0.0.1:21120");
+    loop {
+        if let Ok((mut stream, _)) = listener.as_ref().unwrap().accept().await {
+            let new_wl = crate::common::load_whitelist(&path);
+            let new_len = new_wl.len();
+            let mut wl = whitelist.lock().await;
+            let old_len = wl.len();
+            pm.retain_whitelist(&new_wl).await;
+            *wl = new_wl;
+            drop(wl);
+            log::info!("Whitelist reloaded: {} -> {} IDs", old_len, new_len);
+            let _ = stream.write_all(b"ok\n").await;
+        }
     }
 }
 

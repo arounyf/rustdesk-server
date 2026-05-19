@@ -35,7 +35,8 @@ lazy_static::lazy_static! {
     static ref USAGE: RwLock<HashMap<String, Usage>> = Default::default();
     static ref BLACKLIST: RwLock<HashSet<String>> = Default::default();
     static ref BLOCKLIST: RwLock<HashSet<String>> = Default::default();
-    static ref WHITELIST: RwLock<HashSet<String>> = Default::default();
+    static ref WHITELIST: RwLock<crate::common::Whitelist> = Default::default();
+    static ref WHITELIST_FILE: RwLock<String> = Default::default();
 }
 
 static DOWNGRADE_THRESHOLD_100: AtomicUsize = AtomicUsize::new(66); // 0.66
@@ -49,19 +50,9 @@ const BLOCKLIST_FILE: &str = "blocklist.txt";
 #[tokio::main(flavor = "multi_thread")]
 pub async fn start(port: &str, key: &str, whitelist_path: &str) -> ResultType<()> {
     let key = get_server_sk(key);
+    *WHITELIST_FILE.write().await = whitelist_path.to_owned();
     if !whitelist_path.is_empty() {
-        if let Ok(mut file) = std::fs::File::open(whitelist_path) {
-            let mut contents = String::new();
-            if file.read_to_string(&mut contents).is_ok() {
-                for x in contents.split('\n') {
-                    let id = x.trim().split(' ').next().unwrap_or("");
-                    if !id.is_empty() && !id.starts_with('#') {
-                        WHITELIST.write().await.insert(id.to_owned());
-                    }
-                }
-            }
-        }
-        log::info!("#whitelist({}): {}", whitelist_path, WHITELIST.read().await.len());
+        *WHITELIST.write().await = crate::common::load_whitelist(whitelist_path);
     }
     if let Ok(mut file) = std::fs::File::open(BLACKLIST_FILE) {
         let mut contents = String::new();
@@ -103,6 +94,12 @@ pub async fn start(port: &str, key: &str, whitelist_path: &str) -> ResultType<()
             io_loop(listen_any(port).await?, listen_any(port2).await?, &key).await;
         }
     };
+    let api_token = std::env::var("API_TOKEN").unwrap_or_default();
+    if !api_token.is_empty() {
+        let api_port: u16 = std::env::var("API_PORT").unwrap_or("21114".to_owned()).parse().unwrap_or(21114);
+        log::info!("Whitelist API listening on :{}", api_port);
+        tokio::spawn(api_server(api_port, api_token));
+    }
     let listen_signal = crate::common::listen_signal();
     tokio::select!(
         res = main_task => res,
@@ -447,13 +444,11 @@ async fn make_pair_(stream: impl StreamTrait, addr: SocketAddr, key: &str, limit
                     return;
                 }
                 {
-                    let whitelist = WHITELIST.read().await;
-                    if !whitelist.is_empty() && !whitelist.contains(&rf.id) {
-                        log::warn!("Whitelist: relay DENIED from {} for target {} ({} IDs loaded)", addr, rf.id, whitelist.len());
+                    let whitelist_on = !WHITELIST_FILE.read().await.is_empty();
+                    let wl = WHITELIST.read().await;
+                    if whitelist_on && !rf.id.is_empty() && !crate::common::check_whitelist(&wl, &rf.id) {
+                        log::warn!("Whitelist: relay DENIED for target {}", rf.id);
                         return;
-                    }
-                    if !whitelist.is_empty() {
-                        log::info!("Whitelist: relay ALLOWED from {} for target {}", addr, rf.id);
                     }
                 }
                 if !rf.uuid.is_empty() {
@@ -609,6 +604,121 @@ fn get_server_sk(key: &str) -> String {
     }
 
     key
+}
+
+async fn sync_whitelist_file() {
+    let path = WHITELIST_FILE.read().await.clone();
+    if !path.is_empty() {
+        let wl = WHITELIST.read().await;
+        crate::common::save_whitelist(&path, &wl);
+        drop(wl);
+        // notify hbbs to reload
+        if let Ok(mut s) = tokio::net::TcpStream::connect("127.0.0.1:21120").await {
+            let _ = s.write_all(b"reload\n").await;
+        }
+    }
+}
+
+async fn api_server(port: u16, token: String) {
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await;
+    if let Err(e) = &listener {
+        log::error!("Whitelist API bind failed: {}", e);
+        return;
+    }
+    let listener = listener.unwrap();
+    loop {
+        if let Ok((mut stream, _addr)) = listener.accept().await {
+            let token = token.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                if let Ok(Ok(n)) = hbb_common::timeout(5000, stream.read(&mut buf)).await {
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let parts: Vec<&str> = first_line.split(' ').collect();
+                    let url = if parts.len() > 1 { parts[1] } else { "" };
+                    // strip query string for path matching
+                    let path = url.split('?').next().unwrap_or("/");
+                    // check token via header or query param
+                    let query_token = url.split("?token=").nth(1).and_then(|s| s.split('&').next()).unwrap_or("");
+                    let auth_ok = req.lines().any(|l| l == format!("Authorization: Bearer {}", token))
+                        || (!query_token.is_empty() && query_token == token);
+                    if !auth_ok {
+                        let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\n\r\n").await;
+                        return;
+                    }
+                    if parts.len() < 2 {
+                        return;
+                    }
+                    let method = parts[0];
+                    let path = parts[1].split('?').next().unwrap_or("/");
+                    match (method, path) {
+                        ("GET", "/") => {
+                            let page = include_str!("whitelist.html");
+                            let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}", page);
+                            stream.write_all(resp.as_bytes()).await.ok();
+                        }
+                        ("GET", "/api/list") => {
+                            let wl = WHITELIST.read().await;
+                            let entries: Vec<String> = wl.iter().map(|(id, exp)| {
+                                format!("{{\"id\":\"{}\",\"expire\":{}}}", id, exp.map(|t| t.to_string()).unwrap_or("null".into()))
+                            }).collect();
+                            let json = format!("[{}]", entries.join(","));
+                            drop(wl);
+                            let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}", json);
+                            stream.write_all(resp.as_bytes()).await.ok();
+                        }
+                        ("POST", "/api/add") => {
+                            if let Some((id, expire)) = extract_add_params(&req) {
+                                WHITELIST.write().await.insert(id, expire);
+                                sync_whitelist_file().await;
+                                stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nok").await.ok();
+                            } else {
+                                stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await.ok();
+                            }
+                        }
+                        ("POST", "/api/remove") => {
+                            if let Some(id) = extract_json_id(&req) {
+                                WHITELIST.write().await.remove(&id);
+                                sync_whitelist_file().await;
+                                stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nok").await.ok();
+                            } else {
+                                stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await.ok();
+                            }
+                        }
+                        _ => {
+                            stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").await.ok();
+                        }
+                    }
+                }
+            });
+        }
+    }
+}
+
+fn extract_json_id(req: &str) -> Option<String> {
+    let body = req.split("\r\n\r\n").nth(1)?;
+    if let Some(start) = body.find("\"id\"") {
+        let rest = &body[start + 4..];
+        let val_start = rest.find('"').unwrap_or(0) + 1;
+        let val_end = rest[val_start..].find('"')?;
+        return Some(rest[val_start..val_start + val_end].to_owned());
+    }
+    None
+}
+
+fn extract_add_params(req: &str) -> Option<(String, Option<u64>)> {
+    let body = req.split("\r\n\r\n").nth(1)?;
+    let id = extract_json_id(req)?;
+    let expire = if let Some(start) = body.find("\"expire\"") {
+        let rest = &body[start + 8..];
+        let val_start = rest.find(|c: char| c.is_ascii_digit()).unwrap_or(0);
+        let val_end = rest[val_start..].find(|c: char| !c.is_ascii_digit())?;
+        rest[val_start..val_start + val_end].parse::<u64>().ok()
+    } else {
+        None
+    };
+    let expire = expire.and_then(|t| if t > 0 { Some(t) } else { None });
+    Some((id, expire))
 }
 
 #[async_trait]

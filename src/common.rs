@@ -5,7 +5,7 @@ use hbb_common::{
 use ini::Ini;
 use sodiumoxide::crypto::sign;
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     io::prelude::*,
     io::Read,
     net::SocketAddr,
@@ -155,24 +155,72 @@ pub fn gen_sk(wait: u64) -> (String, Option<sign::SecretKey>) {
     ("".to_owned(), None)
 }
 
-pub fn load_whitelist(path: &str) -> HashSet<String> {
-    let mut whitelist = HashSet::new();
+pub type Whitelist = HashMap<String, Option<u64>>; // id -> expire_timestamp (None = never)
+
+pub fn load_whitelist(path: &str) -> Whitelist {
+    let mut whitelist = HashMap::new();
     if path.is_empty() {
         return whitelist;
     }
     if let Ok(mut file) = std::fs::File::open(path) {
         let mut contents = String::new();
         if file.read_to_string(&mut contents).is_ok() {
+            let now = now();
             for x in contents.split('\n') {
-                let id = x.trim().split(' ').next().unwrap_or("");
-                if !id.is_empty() && !id.starts_with('#') {
-                    whitelist.insert(id.to_owned());
+                let line = x.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                // Split by LAST whitespace: everything before = id, last token = optional expire
+                let (id, expire) = if let Some(pos) = line.rfind(|c: char| c == ' ' || c == '\t') {
+                    let maybe_expire = line[pos..].trim();
+                    if let Ok(ts) = maybe_expire.parse::<u64>() {
+                        if ts > 0 && ts <= now {
+                            // expired, skip
+                            continue;
+                        }
+                        (line[..pos].trim().to_owned(), if ts > 0 { Some(ts) } else { None })
+                    } else {
+                        // last token is not a number, whole line is ID
+                        (line.to_owned(), None)
+                    }
+                } else {
+                    // no whitespace, whole line is ID
+                    (line.to_owned(), None)
+                };
+                if !id.is_empty() {
+                    whitelist.insert(id, expire);
                 }
             }
         }
     }
     log::info!("#whitelist({}): {}", path, whitelist.len());
     whitelist
+}
+
+pub fn save_whitelist(path: &str, whitelist: &Whitelist) {
+    let mut content = String::new();
+    for (id, expire) in whitelist.iter() {
+        if let Some(ts) = expire {
+            content.push_str(&format!("{} {}\n", id, ts));
+        } else {
+            content.push_str(&format!("{}\n", id));
+        }
+    }
+    let tmp = format!("{}.tmp", path);
+    if let Ok(mut f) = std::fs::File::create(&tmp) {
+        f.write_all(content.as_bytes()).ok();
+        drop(f);
+        std::fs::rename(&tmp, path).ok();
+    }
+}
+
+pub fn check_whitelist(whitelist: &Whitelist, id: &str) -> bool {
+    match whitelist.get(id) {
+        None => false,
+        Some(None) => true, // never expires
+        Some(Some(expire)) => *expire > now(),
+    }
 }
 
 #[cfg(unix)]

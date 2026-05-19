@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RustDesk 白名单管理</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font:14px/1.5 system-ui,sans-serif;background:#f0f2f5;color:#333;min-height:100vh}
+.header{background:#1a1a2e;color:#fff;padding:16px 24px;display:flex;align-items:center;justify-content:space-between}
+.header h1{font-size:18px;font-weight:500}
+.container{max-width:800px;margin:24px auto;padding:0 16px}
+.card{background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:20px;margin-bottom:16px}
+.card h2{font-size:15px;margin-bottom:14px;color:#1a1a2e}
+.form-row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.form-row input{padding:8px 12px;border:1px solid #d9d9d9;border-radius:4px;font-size:14px;flex:1;min-width:140px}
+.form-row button{padding:8px 20px;border:none;border-radius:4px;font-size:14px;cursor:pointer;color:#fff}
+.btn-add{background:#1890ff}
+.btn-add:hover{background:#40a9ff}
+table{width:100%;border-collapse:collapse}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #f0f0f0}
+th{font-weight:500;color:#666;font-size:13px}
+.expired{color:#ff4d4f}
+.never{color:#52c41a}
+.btn-del{background:none;border:1px solid #ff4d4f;color:#ff4d4f;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px}
+.btn-del:hover{background:#ff4d4f;color:#fff}
+.token-bar{background:#fffbe6;border:1px solid #ffe58f;padding:8px 16px;border-radius:4px;margin-bottom:16px;display:none}
+.empty{text-align:center;color:#999;padding:30px}
+</style>
+</head>
+<body>
+<div class="header"><h1>RustDesk 白名单管理</h1><span id="count"></span></div>
+<div class="container">
+<div class="token-bar" id="tokenBar">Token 未设置，在 URL 后加 ?token=xxx 或点击 <a href="#" onclick="setToken()">设置</a></div>
+<div class="card">
+<h2>添加设备</h2>
+<div class="form-row">
+<input id="newId" placeholder="客户端 ID">
+<input id="newExpire" type="datetime-local" placeholder="到期时间（可选）">
+<button class="btn-add" onclick="add()">添加</button>
+</div>
+</div>
+<div class="card">
+<h2>白名单列表</h2>
+<div id="list"></div>
+</div>
+</div>
+<script>
+let token = new URLSearchParams(location.search).get('token') || localStorage.getItem('wl_token') || '';
+
+function setToken() {
+    const t = prompt('输入 API Token:');
+    if (t) { token = t; localStorage.setItem('wl_token', t); load(); }
+}
+
+async function api(method, path, body) {
+    const opts = { method, headers: { 'Authorization': 'Bearer ' + token } };
+    if (body) opts.body = body;
+    const r = await fetch(path, opts);
+    return r.text();
+}
+
+async function load() {
+    if (!token) { document.getElementById('tokenBar').style.display = 'block'; return; }
+    document.getElementById('tokenBar').style.display = 'none';
+    const data = await api('GET', '/api/list');
+    try {
+        const entries = JSON.parse(data);
+        const now = Math.floor(Date.now() / 1000);
+        let html = '<table><tr><th>客户端 ID</th><th>到期时间</th><th>操作</th></tr>';
+        if (entries.length === 0) html = '<div class="empty">暂无设备</div>';
+        entries.forEach(e => {
+            const expired = e.expire && e.expire < now;
+            const expStr = e.expire ? new Date(e.expire*1000).toLocaleString('zh-CN') : '<span class="never">永不过期</span>';
+            const cls = expired ? 'expired' : '';
+            html += `<tr class="${cls}"><td>${e.id}</td><td>${expStr}</td><td><button class="btn-del" onclick="remove('${e.id}')">删除</button></td></tr>`;
+        });
+        html += '</table>';
+        document.getElementById('list').innerHTML = html;
+        document.getElementById('count').textContent = entries.length + ' 台设备';
+    } catch(e) { document.getElementById('list').innerHTML = '<div class="empty">加载失败</div>'; }
+}
+
+async function add() {
+    const id = document.getElementById('newId').value.replace(/\s/g, '');
+    if (!id) return alert('请输入客户端 ID');
+    const expireStr = document.getElementById('newExpire').value;
+    const expire = expireStr ? Math.floor(new Date(expireStr).getTime() / 1000) : 0;
+    const body = JSON.stringify({ id, expire });
+    await api('POST', '/api/add', body);
+    document.getElementById('newId').value = '';
+    document.getElementById('newExpire').value = '';
+    load();
+}
+
+async function remove(id) {
+    if (!confirm('确定删除 ' + id + ' ?')) return;
+    await api('POST', '/api/remove', JSON.stringify({ id }));
+    load();
+}
+
+load();
+</script>
+</body>
+</html>

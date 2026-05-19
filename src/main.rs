@@ -33,7 +33,8 @@ fn main() -> ResultType<()> {
     let rmem = get_arg("rmem").parse::<usize>().unwrap_or(RMEM);
     let serial: i32 = get_arg("serial").parse().unwrap_or(0);
     crate::common::check_software_update();
-    let whitelist = crate::common::load_whitelist(&get_arg_or("whitelist", "".to_owned()));
-    RendezvousServer::start(port, serial, &get_arg_or("key", "-".to_owned()), rmem, whitelist)?;
+    let whitelist_path = get_arg_or("whitelist", "".to_owned());
+    let whitelist = crate::common::load_whitelist(&whitelist_path);
+    RendezvousServer::start(port, serial, &get_arg_or("key", "-".to_owned()), rmem, whitelist, whitelist_path)?;
     Ok(())
 }

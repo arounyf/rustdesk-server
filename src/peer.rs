@@ -177,4 +177,15 @@ impl PeerMap {
     pub(crate) async fn is_in_memory(&self, id: &str) -> bool {
         self.map.read().await.contains_key(id)
     }
+
+    pub(crate) async fn retain_whitelist(&self, whitelist: &crate::common::Whitelist) {
+        let removed: Vec<String> = self.map.read().await.keys()
+            .filter(|id| !id.starts_with("(:") && !whitelist.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in &removed {
+            self.map.write().await.remove(id);
+            log::info!("Whitelist: removed peer {} (not in whitelist)", id);
+        }
+    }
 }
