@@ -207,11 +207,8 @@ pub fn save_whitelist(path: &str, whitelist: &Whitelist) {
             content.push_str(&format!("{}\n", id));
         }
     }
-    let tmp = format!("{}.tmp", path);
-    if let Ok(mut f) = std::fs::File::create(&tmp) {
+    if let Ok(mut f) = std::fs::File::create(path) {
         f.write_all(content.as_bytes()).ok();
-        drop(f);
-        std::fs::rename(&tmp, path).ok();
     }
 }
 
