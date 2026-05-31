@@ -693,6 +693,17 @@ async fn api_server(port: u16, token: String) {
                                 stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await.ok();
                             }
                         }
+                        ("POST", "/api/note") => {
+                            if let Some((id, _, note)) = extract_add_params(&req) {
+                                WHITELIST.write().await.get_mut(&id).map(|e| {
+                                    e.note = note;
+                                });
+                                sync_whitelist_file().await;
+                                stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nok").await.ok();
+                            } else {
+                                stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await.ok();
+                            }
+                        }
                         ("POST", "/api/expire") => {
                             if let Some(id) = extract_json_id(&req) {
                                 WHITELIST.write().await.get_mut(&id).map(|e| {
