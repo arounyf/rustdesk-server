@@ -9,23 +9,29 @@
 body{font:14px/1.5 system-ui,sans-serif;background:#f0f2f5;color:#333;min-height:100vh}
 .header{background:#1a1a2e;color:#fff;padding:16px 24px;display:flex;align-items:center;justify-content:space-between}
 .header h1{font-size:18px;font-weight:500}
-.container{max-width:800px;margin:24px auto;padding:0 16px}
+.container{max-width:960px;margin:24px auto;padding:0 16px}
 .card{background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:20px;margin-bottom:16px}
 .card h2{font-size:15px;margin-bottom:14px;color:#1a1a2e}
 .form-row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
 .form-row input{padding:8px 12px;border:1px solid #d9d9d9;border-radius:4px;font-size:14px;flex:1;min-width:140px}
-.form-row button{padding:8px 20px;border:none;border-radius:4px;font-size:14px;cursor:pointer;color:#fff}
+.form-row button{padding:8px 16px;border:none;border-radius:4px;font-size:14px;cursor:pointer;color:#fff}
 .btn-add{background:#1890ff}
 .btn-add:hover{background:#40a9ff}
+.quick-btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;align-items:center}
+.quick-btns button{padding:4px 12px;border:1px solid #d9d9d9;border-radius:4px;background:#fff;cursor:pointer;font-size:13px}
+.quick-btns button.active{background:#1890ff;color:#fff;border-color:#1890ff}
 table{width:100%;border-collapse:collapse}
 th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #f0f0f0}
 th{font-weight:500;color:#666;font-size:13px}
-.expired{color:#ff4d4f}
+.expired{background:#fff1f0}
 .never{color:#52c41a}
+.btn-expire{background:none;border:1px solid #faad14;color:#faad14;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px;margin-right:4px}
+.btn-expire:hover{background:#faad14;color:#fff}
 .btn-del{background:none;border:1px solid #ff4d4f;color:#ff4d4f;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px}
 .btn-del:hover{background:#ff4d4f;color:#fff}
 .token-bar{background:#fffbe6;border:1px solid #ffe58f;padding:8px 16px;border-radius:4px;margin-bottom:16px;display:none}
 .empty{text-align:center;color:#999;padding:30px}
+td.note{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:default}
 </style>
 </head>
 <body>
@@ -36,8 +42,19 @@ th{font-weight:500;color:#666;font-size:13px}
 <h2>添加设备</h2>
 <div class="form-row">
 <input id="newId" placeholder="客户端 ID">
-<input id="newExpire" type="datetime-local" placeholder="到期时间（可选）">
+<input id="newNote" placeholder="备注（可选）">
 <button class="btn-add" onclick="add()">添加</button>
+</div>
+<div class="quick-btns">
+<span style="font-size:13px;color:#666;margin-right:4px">到期时间:</span>
+<button onclick="setExpire(7)">7天</button>
+<button onclick="setExpire(30)">30天</button>
+<button onclick="setExpire(180)">180天</button>
+<button onclick="setExpire(365)">365天</button>
+<button onclick="setExpire(0)">永不过期</button>
+<input id="customDays" type="number" placeholder="自定义天数" style="width:110px;padding:4px 8px;border:1px solid #d9d9d9;border-radius:4px;font-size:13px">
+<button onclick="setExpire(parseInt(document.getElementById('customDays').value)||0)">设置</button>
+<span id="expireHint" style="font-size:13px;color:#1890ff"></span>
 </div>
 </div>
 <div class="card">
@@ -47,10 +64,20 @@ th{font-weight:500;color:#666;font-size:13px}
 </div>
 <script>
 let token = new URLSearchParams(location.search).get('token') || localStorage.getItem('wl_token') || '';
+let expireDays = 0;
 
 function setToken() {
     const t = prompt('输入 API Token:');
     if (t) { token = t; localStorage.setItem('wl_token', t); load(); }
+}
+
+function setExpire(days) {
+    expireDays = days;
+    document.querySelectorAll('.quick-btns button').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    const hint = document.getElementById('expireHint');
+    if (days === 0) hint.textContent = '永不过期';
+    else hint.textContent = days + '天后 (' + new Date(Date.now()+days*86400000).toLocaleDateString('zh-CN') + ')';
 }
 
 async function api(method, path, body) {
@@ -67,35 +94,43 @@ async function load() {
     try {
         const entries = JSON.parse(data);
         const now = Math.floor(Date.now() / 1000);
-        let html = '<table><tr><th>客户端 ID</th><th>到期时间</th><th>操作</th></tr>';
+        let html = '<table><tr><th>客户端 ID</th><th>创建时间</th><th>到期时间</th><th>备注</th><th>操作</th></tr>';
         if (entries.length === 0) html = '<div class="empty">暂无设备</div>';
         entries.forEach(e => {
-            const expired = e.expire && e.expire < now;
-            const expStr = e.expire ? new Date(e.expire*1000).toLocaleString('zh-CN') : '<span class="never">永不过期</span>';
+            const expired = e.expire_at && e.expire_at < now;
+            const expStr = e.expire_at ? new Date(e.expire_at*1000).toLocaleString('zh-CN') : '<span class="never">永不过期</span>';
+            const createdStr = new Date(e.created_at*1000).toLocaleString('zh-CN');
             const cls = expired ? 'expired' : '';
-            html += `<tr class="${cls}"><td>${e.id}</td><td>${expStr}</td><td><button class="btn-del" onclick="remove('${e.id}')">删除</button></td></tr>`;
+            html += `<tr class="${cls}"><td>${e.id}</td><td>${createdStr}</td><td>${expStr}</td><td class="note" title="${e.note||''}">${e.note||''}</td><td>`;
+            if (!expired && !(e.expire_at && e.expire_at <= 1)) html += `<button class="btn-expire" onclick="expireNow('${e.id}')">过期</button>`;
+            html += `<button class="btn-del" onclick="remove('${e.id}')">删除</button></td></tr>`;
         });
         html += '</table>';
         document.getElementById('list').innerHTML = html;
         document.getElementById('count').textContent = entries.length + ' 台设备';
-    } catch(e) { document.getElementById('list').innerHTML = '<div class="empty">加载失败</div>'; }
+    } catch(e) { document.getElementById('list').innerHTML = '<div class="empty">加载失败: '+e.message+'</div>'; }
 }
 
 async function add() {
     const id = document.getElementById('newId').value.replace(/\s/g, '');
     if (!id) return alert('请输入客户端 ID');
-    const expireStr = document.getElementById('newExpire').value;
-    const expire = expireStr ? Math.floor(new Date(expireStr).getTime() / 1000) : 0;
-    const body = JSON.stringify({ id, expire });
-    await api('POST', '/api/add', body);
+    const note = document.getElementById('newNote').value.trim();
+    const expireAt = expireDays > 0 ? Math.floor(Date.now()/1000) + expireDays*86400 : 0;
+    await api('POST', '/api/add', JSON.stringify({ id, expire_at: expireAt, note }));
     document.getElementById('newId').value = '';
-    document.getElementById('newExpire').value = '';
+    document.getElementById('newNote').value = '';
     load();
 }
 
 async function remove(id) {
     if (!confirm('确定删除 ' + id + ' ?')) return;
     await api('POST', '/api/remove', JSON.stringify({ id }));
+    load();
+}
+
+async function expireNow(id) {
+    if (!confirm('确定将 ' + id + ' 标记为过期？')) return;
+    await api('POST', '/api/expire', JSON.stringify({ id }));
     load();
 }
 

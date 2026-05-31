@@ -659,8 +659,11 @@ async fn api_server(port: u16, token: String) {
                         }
                         ("GET", "/api/list") => {
                             let wl = WHITELIST.read().await;
-                            let entries: Vec<String> = wl.iter().map(|(id, exp)| {
-                                format!("{{\"id\":\"{}\",\"expire\":{}}}", id, exp.map(|t| t.to_string()).unwrap_or("null".into()))
+                            let entries: Vec<String> = wl.iter().map(|(id, e)| {
+                                format!("{{\"id\":\"{}\",\"created_at\":{},\"expire_at\":{},\"note\":\"{}\"}}",
+                                    id, e.created_at,
+                                    e.expire_at.map(|t| t.to_string()).unwrap_or("null".into()),
+                                    e.note.replace('\"', "\\\""))
                             }).collect();
                             let json = format!("[{}]", entries.join(","));
                             drop(wl);
@@ -668,8 +671,13 @@ async fn api_server(port: u16, token: String) {
                             stream.write_all(resp.as_bytes()).await.ok();
                         }
                         ("POST", "/api/add") => {
-                            if let Some((id, expire)) = extract_add_params(&req) {
-                                WHITELIST.write().await.insert(id, expire);
+                            if let Some((id, expire, note)) = extract_add_params(&req) {
+                                let entry = crate::common::WhitelistEntry {
+                                    created_at: crate::common::now(),
+                                    expire_at: expire,
+                                    note,
+                                };
+                                WHITELIST.write().await.insert(id, entry);
                                 sync_whitelist_file().await;
                                 stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nok").await.ok();
                             } else {
@@ -679,6 +687,17 @@ async fn api_server(port: u16, token: String) {
                         ("POST", "/api/remove") => {
                             if let Some(id) = extract_json_id(&req) {
                                 WHITELIST.write().await.remove(&id);
+                                sync_whitelist_file().await;
+                                stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nok").await.ok();
+                            } else {
+                                stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await.ok();
+                            }
+                        }
+                        ("POST", "/api/expire") => {
+                            if let Some(id) = extract_json_id(&req) {
+                                WHITELIST.write().await.get_mut(&id).map(|e| {
+                                    e.expire_at = Some(1); // 1970 = expired
+                                });
                                 sync_whitelist_file().await;
                                 stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nok").await.ok();
                             } else {
@@ -706,19 +725,29 @@ fn extract_json_id(req: &str) -> Option<String> {
     None
 }
 
-fn extract_add_params(req: &str) -> Option<(String, Option<u64>)> {
+fn extract_add_params(req: &str) -> Option<(String, Option<u64>, String)> {
     let body = req.split("\r\n\r\n").nth(1)?;
     let id = extract_json_id(req)?;
-    let expire = if let Some(start) = body.find("\"expire\"") {
+    let expire = if let Some(start) = body.find("\"expire_at\"") {
+        let rest = &body[start + 11..];
+        let val_start = rest.find(|c: char| c.is_ascii_digit()).unwrap_or(0);
+        let end = rest[val_start..].find(|c: char| !c.is_ascii_digit())?;
+        let ts = rest[val_start..val_start + end].parse::<u64>().ok()?;
+        if ts > 0 { Some(ts) } else { None }
+    } else if let Some(start) = body.find("\"expire\"") {
         let rest = &body[start + 8..];
         let val_start = rest.find(|c: char| c.is_ascii_digit()).unwrap_or(0);
-        let val_end = rest[val_start..].find(|c: char| !c.is_ascii_digit())?;
-        rest[val_start..val_start + val_end].parse::<u64>().ok()
-    } else {
-        None
-    };
-    let expire = expire.and_then(|t| if t > 0 { Some(t) } else { None });
-    Some((id, expire))
+        let end = rest[val_start..].find(|c: char| !c.is_ascii_digit())?;
+        let ts = rest[val_start..val_start + end].parse::<u64>().ok()?;
+        if ts > 0 { Some(ts) } else { None }
+    } else { None };
+    let note = if let Some(start) = body.find("\"note\"") {
+        let rest = &body[start + 6..];
+        let val_start = rest.find('"').unwrap_or(0) + 1;
+        let end = rest[val_start..].find('"')?;
+        rest[val_start..val_start + end].to_owned()
+    } else { String::new() };
+    Some((id, expire, note))
 }
 
 #[async_trait]

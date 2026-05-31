@@ -155,7 +155,26 @@ pub fn gen_sk(wait: u64) -> (String, Option<sign::SecretKey>) {
     ("".to_owned(), None)
 }
 
-pub type Whitelist = HashMap<String, Option<u64>>; // id -> expire_timestamp (None = never)
+use serde_derive::{Deserialize, Serialize};
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WhitelistEntry {
+    #[serde(default = "now")]
+    pub created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expire_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct WhitelistItem {
+    pub id: String,
+    #[serde(flatten)]
+    pub entry: WhitelistEntry,
+}
+
+pub type Whitelist = HashMap<String, WhitelistEntry>;
 
 pub fn load_whitelist(path: &str) -> Whitelist {
     let mut whitelist = HashMap::new();
@@ -166,30 +185,34 @@ pub fn load_whitelist(path: &str) -> Whitelist {
         let mut contents = String::new();
         if file.read_to_string(&mut contents).is_ok() {
             let now = now();
-            for x in contents.split('\n') {
-                let line = x.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                // Split by LAST whitespace: everything before = id, last token = optional expire
-                let (id, expire) = if let Some(pos) = line.rfind(|c: char| c == ' ' || c == '\t') {
-                    let maybe_expire = line[pos..].trim();
-                    if let Ok(ts) = maybe_expire.parse::<u64>() {
-                        if ts > 0 && ts <= now {
-                            // expired, skip
-                            continue;
+            // Try JSON first, fall back to old format
+            if let Ok(items) = serde_json::from_str::<Vec<WhitelistItem>>(&contents) {
+                for item in items {
+                    if !item.id.is_empty() {
+                        if let Some(exp) = item.entry.expire_at {
+                            if exp > 0 && exp <= now { continue; } // expired
+                            let e = item.entry.clone();
+                            whitelist.insert(item.id, WhitelistEntry { expire_at: Some(exp), ..e });
+                        } else {
+                            whitelist.insert(item.id, item.entry);
                         }
-                        (line[..pos].trim().to_owned(), if ts > 0 { Some(ts) } else { None })
-                    } else {
-                        // last token is not a number, whole line is ID
-                        (line.to_owned(), None)
                     }
-                } else {
-                    // no whitespace, whole line is ID
-                    (line.to_owned(), None)
-                };
-                if !id.is_empty() {
-                    whitelist.insert(id, expire);
+                }
+            } else {
+                // Legacy format: id [expire_ts]
+                for x in contents.split('\n') {
+                    let line = x.trim();
+                    if line.is_empty() || line.starts_with('#') { continue; }
+                    let (id, expire) = if let Some(pos) = line.rfind(|c: char| c == ' ' || c == '\t') {
+                        let maybe_expire = line[pos..].trim();
+                        if let Ok(ts) = maybe_expire.parse::<u64>() {
+                            if ts > 0 && ts <= now { continue; }
+                            (line[..pos].trim().to_owned(), if ts > 0 { Some(ts) } else { None })
+                        } else { (line.to_owned(), None) }
+                    } else { (line.to_owned(), None) };
+                    if !id.is_empty() {
+                        whitelist.insert(id, WhitelistEntry { created_at: now, expire_at: expire, note: String::new() });
+                    }
                 }
             }
         }
@@ -199,24 +222,21 @@ pub fn load_whitelist(path: &str) -> Whitelist {
 }
 
 pub fn save_whitelist(path: &str, whitelist: &Whitelist) {
-    let mut content = String::new();
-    for (id, expire) in whitelist.iter() {
-        if let Some(ts) = expire {
-            content.push_str(&format!("{} {}\n", id, ts));
-        } else {
-            content.push_str(&format!("{}\n", id));
+    let items: Vec<WhitelistItem> = whitelist.iter().map(|(id, e)| WhitelistItem {
+        id: id.clone(),
+        entry: e.clone(),
+    }).collect();
+    if let Ok(json) = serde_json::to_string_pretty(&items) {
+        if let Ok(mut f) = std::fs::File::create(path) {
+            f.write_all(json.as_bytes()).ok();
         }
-    }
-    if let Ok(mut f) = std::fs::File::create(path) {
-        f.write_all(content.as_bytes()).ok();
     }
 }
 
 pub fn check_whitelist(whitelist: &Whitelist, id: &str) -> bool {
     match whitelist.get(id) {
         None => false,
-        Some(None) => true, // never expires
-        Some(Some(expire)) => *expire > now(),
+        Some(e) => e.expire_at.map_or(true, |exp| exp > now()),
     }
 }
 
