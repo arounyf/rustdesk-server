@@ -39,6 +39,18 @@ th{font-weight:500;color:#666;font-size:13px}
 .note-cell input{border:1px solid transparent;background:transparent;width:100%;padding:10px 12px;font-size:14px;border-radius:4px;outline:none}
 .note-cell input:focus{border-color:#1890ff;background:#fff}
 .act-group{white-space:nowrap}
+.modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:999;justify-content:center;align-items:center}
+.modal-overlay.show{display:flex}
+.modal{background:#fff;border-radius:8px;padding:24px;min-width:300px;box-shadow:0 4px 20px rgba(0,0,0,.15)}
+.modal h3{margin-bottom:16px;font-size:16px}
+.modal .opts{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.modal .opts button{padding:8px 16px;border:1px solid #d9d9d9;border-radius:4px;background:#fff;cursor:pointer;font-size:14px}
+.modal .opts button:hover{border-color:#1890ff;color:#1890ff}
+.modal .opts button.sel{background:#1890ff;color:#fff;border-color:#1890ff}
+.modal .actions{display:flex;gap:8px;justify-content:flex-end}
+.modal .actions button{padding:6px 16px;border-radius:4px;cursor:pointer;font-size:14px}
+.modal .btn-ok{background:#1890ff;color:#fff;border:none}
+.modal .btn-cancel{background:#fff;color:#666;border:1px solid #d9d9d9}
 </style>
 </head>
 <body>
@@ -67,8 +79,25 @@ th{font-weight:500;color:#666;font-size:13px}
 <div id="list"></div>
 </div>
 </div>
+<div class="modal-overlay" id="renewDlg">
+<div class="modal">
+<h3 id="renewTitle">续约天数</h3>
+<div class="opts" id="renewOpts">
+<button data-d="7">7天</button>
+<button data-d="30">30天</button>
+<button data-d="180">180天</button>
+<button data-d="365">365天</button>
+<button data-d="0">永久</button>
+</div>
+<div class="actions">
+<button class="btn-cancel" onclick="closeDlg()">取消</button>
+<button class="btn-ok" onclick="doRenew()">确定</button>
+</div>
+</div>
+</div>
 <script>
 let token = new URLSearchParams(location.search).get('token') || localStorage.getItem('wl_token') || '';
+let renewId = '', renewDays = 30;
 
 function setToken() {
     const t = prompt('输入 API Token:');
@@ -78,6 +107,24 @@ function setToken() {
 document.getElementById('expireSelect').onchange = function() {
     document.getElementById('customDays').style.display = this.value === '-1' ? '' : 'none';
 };
+
+document.getElementById('renewOpts').onclick = function(e) {
+    if (e.target.tagName === 'BUTTON') {
+        document.querySelectorAll('#renewOpts button').forEach(b => b.classList.remove('sel'));
+        e.target.classList.add('sel');
+        renewDays = parseInt(e.target.dataset.d);
+    }
+};
+document.querySelector('#renewOpts button[data-d="30"]').classList.add('sel');
+
+function closeDlg() { document.getElementById('renewDlg').classList.remove('show'); }
+
+async function doRenew() {
+    closeDlg();
+    if (!renewId) return;
+    await api('POST', '/api/renew', JSON.stringify({ id: renewId, expire_at: renewDays }));
+    load();
+}
 
 async function api(method, path, body) {
     const opts = { method, headers: { 'Authorization': 'Bearer ' + token } };
@@ -106,17 +153,13 @@ async function load() {
             html += `<tr class="${cls}"><td>${e.id}</td><td>${createdStr}</td><td>${expStr}</td><td>${status}</td>`;
             html += `<td class="note-cell"><input value="${esc(e.note||'')}" data-id="${e.id}" data-old="${esc(e.note||'')}" onfocus="this.dataset.old=this.value" onblur="saveNote(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>`;
             html += '<td class="act-group">';
-            if (!locked && !expired) {
-                html += `<button class="btn-re" onclick="renew('${e.id}',7)">7天</button>`;
-                html += `<button class="btn-re" onclick="renew('${e.id}',30)">30天</button>`;
-                html += `<button class="btn-re" onclick="renew('${e.id}',0)">永久</button>`;
-                html += `<button class="btn-lock" onclick="toggleLock('${e.id}',true)">锁</button>`;
-            } else if (locked) {
+            if (locked) {
                 html += `<button class="btn-unlock" onclick="toggleLock('${e.id}',false)">解锁</button>`;
-            } else if (expired) {
-                html += `<button class="btn-re" onclick="renew('${e.id}',30)">续期</button>`;
+            } else {
+                html += `<button class="btn-re" onclick="showRenew('${e.id}','${esc(e.id)}')">续约</button>`;
+                html += `<button class="btn-lock" onclick="toggleLock('${e.id}',true)">锁定</button>`;
             }
-            html += `<button class="btn-del" onclick="remove('${e.id}')">删</button></td></tr>`;
+            html += `<button class="btn-del" onclick="remove('${e.id}')">删除</button></td></tr>`;
         });
         html += '</table>';
         document.getElementById('list').innerHTML = html;
@@ -125,6 +168,12 @@ async function load() {
 }
 
 function esc(s) { return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function showRenew(id, name) {
+    renewId = id;
+    document.getElementById('renewTitle').textContent = '续约: ' + name;
+    document.getElementById('renewDlg').classList.add('show');
+}
 
 async function saveNote(input) {
     const id = input.dataset.id;
@@ -144,11 +193,6 @@ async function add() {
     await api('POST', '/api/add', JSON.stringify({ id, expire_at: expireAt, note }));
     document.getElementById('newId').value = '';
     document.getElementById('newNote').value = '';
-    load();
-}
-
-async function renew(id, days) {
-    await api('POST', '/api/renew', JSON.stringify({ id, expire_at: days > 0 ? days : 0 }));
     load();
 }
 
