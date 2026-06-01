@@ -25,18 +25,20 @@ th{font-weight:500;color:#666;font-size:13px}
 .locked{background:#fff1f0}
 .locked td{color:#999}
 .never{color:#52c41a}
-.btn-lock{background:none;border:1px solid #faad14;color:#faad14;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px;margin-right:4px}
+.btn-re{background:none;border:1px solid #1890ff;color:#1890ff;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px;margin-right:4px}
+.btn-re:hover{background:#1890ff;color:#fff}
+.btn-lock{background:none;border:1px solid #faad14;color:#faad14;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px;margin-right:4px}
 .btn-lock:hover{background:#faad14;color:#fff}
-.btn-unlock{background:none;border:1px solid #52c41a;color:#52c41a;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px;margin-right:4px}
+.btn-unlock{background:none;border:1px solid #52c41a;color:#52c41a;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px;margin-right:4px}
 .btn-unlock:hover{background:#52c41a;color:#fff}
-.btn-del{background:none;border:1px solid #ff4d4f;color:#ff4d4f;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px}
+.btn-del{background:none;border:1px solid #ff4d4f;color:#ff4d4f;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:12px}
 .btn-del:hover{background:#ff4d4f;color:#fff}
 .token-bar{background:#fffbe6;border:1px solid #ffe58f;padding:8px 16px;border-radius:4px;margin-bottom:16px;display:none}
 .empty{text-align:center;color:#999;padding:30px}
 .note-cell{padding:0!important}
 .note-cell input{border:1px solid transparent;background:transparent;width:100%;padding:10px 12px;font-size:14px;border-radius:4px;outline:none}
 .note-cell input:focus{border-color:#1890ff;background:#fff}
-.note-cell input.modified{border-color:#faad14}
+.act-group{white-space:nowrap}
 </style>
 </head>
 <body>
@@ -103,13 +105,18 @@ async function load() {
                 (expired ? '<span style="color:#faad14">已过期</span>' : '<span style="color:#52c41a">正常</span>');
             html += `<tr class="${cls}"><td>${e.id}</td><td>${createdStr}</td><td>${expStr}</td><td>${status}</td>`;
             html += `<td class="note-cell"><input value="${esc(e.note||'')}" data-id="${e.id}" data-old="${esc(e.note||'')}" onfocus="this.dataset.old=this.value" onblur="saveNote(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>`;
-            html += '<td>';
-            if (locked) {
+            html += '<td class="act-group">';
+            if (!locked && !expired) {
+                html += `<button class="btn-re" onclick="renew('${e.id}',7)">7天</button>`;
+                html += `<button class="btn-re" onclick="renew('${e.id}',30)">30天</button>`;
+                html += `<button class="btn-re" onclick="renew('${e.id}',0)">永久</button>`;
+                html += `<button class="btn-lock" onclick="toggleLock('${e.id}',true)">锁</button>`;
+            } else if (locked) {
                 html += `<button class="btn-unlock" onclick="toggleLock('${e.id}',false)">解锁</button>`;
-            } else {
-                html += `<button class="btn-lock" onclick="toggleLock('${e.id}',true)">锁定</button>`;
+            } else if (expired) {
+                html += `<button class="btn-re" onclick="renew('${e.id}',30)">续期</button>`;
             }
-            html += `<button class="btn-del" onclick="remove('${e.id}')">删除</button></td></tr>`;
+            html += `<button class="btn-del" onclick="remove('${e.id}')">删</button></td></tr>`;
         });
         html += '</table>';
         document.getElementById('list').innerHTML = html;
@@ -123,10 +130,8 @@ async function saveNote(input) {
     const id = input.dataset.id;
     const note = input.value.trim();
     if (note === input.dataset.old) return;
-    input.classList.add('modified');
     await api('POST', '/api/note', JSON.stringify({ id, note }));
     input.dataset.old = note;
-    input.classList.remove('modified');
 }
 
 async function add() {
@@ -139,6 +144,11 @@ async function add() {
     await api('POST', '/api/add', JSON.stringify({ id, expire_at: expireAt, note }));
     document.getElementById('newId').value = '';
     document.getElementById('newNote').value = '';
+    load();
+}
+
+async function renew(id, days) {
+    await api('POST', '/api/renew', JSON.stringify({ id, expire_at: days > 0 ? days : 0 }));
     load();
 }
 
