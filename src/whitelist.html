@@ -22,17 +22,20 @@ body{font:14px/1.5 system-ui,sans-serif;background:#f0f2f5;color:#333;min-height
 table{width:100%;border-collapse:collapse}
 th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #f0f0f0}
 th{font-weight:500;color:#666;font-size:13px}
-.expired{background:#fff1f0}
+.locked{background:#fff1f0}
+.locked td{color:#999}
 .never{color:#52c41a}
-.btn-expire{background:none;border:1px solid #faad14;color:#faad14;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px;margin-right:4px}
-.btn-expire:hover{background:#faad14;color:#fff}
+.btn-lock{background:none;border:1px solid #faad14;color:#faad14;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px;margin-right:4px}
+.btn-lock:hover{background:#faad14;color:#fff}
+.btn-unlock{background:none;border:1px solid #52c41a;color:#52c41a;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px;margin-right:4px}
+.btn-unlock:hover{background:#52c41a;color:#fff}
 .btn-del{background:none;border:1px solid #ff4d4f;color:#ff4d4f;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:13px}
 .btn-del:hover{background:#ff4d4f;color:#fff}
 .token-bar{background:#fffbe6;border:1px solid #ffe58f;padding:8px 16px;border-radius:4px;margin-bottom:16px;display:none}
 .empty{text-align:center;color:#999;padding:30px}
 .note-cell{padding:0!important}
-.note-cell input{border:1px solid transparent;background:transparent;width:100%;padding:10px 12px;font-size:14px;border-radius:4px;outline:none;cursor:default}
-.note-cell input:focus{border-color:#1890ff;background:#fff;cursor:text}
+.note-cell input{border:1px solid transparent;background:transparent;width:100%;padding:10px 12px;font-size:14px;border-radius:4px;outline:none}
+.note-cell input:focus{border-color:#1890ff;background:#fff}
 .note-cell input.modified{border-color:#faad14}
 </style>
 </head>
@@ -71,8 +74,7 @@ function setToken() {
 }
 
 document.getElementById('expireSelect').onchange = function() {
-    const v = this.value;
-    document.getElementById('customDays').style.display = v === '-1' ? '' : 'none';
+    document.getElementById('customDays').style.display = this.value === '-1' ? '' : 'none';
 };
 
 async function api(method, path, body) {
@@ -89,17 +91,24 @@ async function load() {
     try {
         const entries = JSON.parse(data);
         const now = Math.floor(Date.now() / 1000);
-        let html = '<table><tr><th>客户端 ID</th><th>创建时间</th><th>到期时间</th><th>备注</th><th>操作</th></tr>';
+        let html = '<table><tr><th>客户端 ID</th><th>创建时间</th><th>到期时间</th><th>状态</th><th>备注</th><th>操作</th></tr>';
         if (entries.length === 0) html = '<div class="empty">暂无设备</div>';
         entries.forEach(e => {
-            const expired = e.expire_at && e.expire_at < now;
+            const expired = e.expire_at && e.expire_at < now && e.expire_at > 1;
+            const locked = e.locked;
+            const cls = locked ? 'locked' : (expired ? 'expired' : '');
             const expStr = e.expire_at ? new Date(e.expire_at*1000).toLocaleString('zh-CN') : '<span class="never">永不过期</span>';
             const createdStr = new Date(e.created_at*1000).toLocaleString('zh-CN');
-            const cls = expired ? 'expired' : '';
-            html += `<tr class="${cls}"><td>${e.id}</td><td>${createdStr}</td><td>${expStr}</td>`;
+            const status = locked ? '<span style="color:#ff4d4f">已锁定</span>' :
+                (expired ? '<span style="color:#faad14">已过期</span>' : '<span style="color:#52c41a">正常</span>');
+            html += `<tr class="${cls}"><td>${e.id}</td><td>${createdStr}</td><td>${expStr}</td><td>${status}</td>`;
             html += `<td class="note-cell"><input value="${esc(e.note||'')}" data-id="${e.id}" data-old="${esc(e.note||'')}" onfocus="this.dataset.old=this.value" onblur="saveNote(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>`;
             html += '<td>';
-            if (!expired && !(e.expire_at && e.expire_at <= 1)) html += `<button class="btn-expire" onclick="expireNow('${e.id}')">过期</button>`;
+            if (locked) {
+                html += `<button class="btn-unlock" onclick="toggleLock('${e.id}',false)">解锁</button>`;
+            } else {
+                html += `<button class="btn-lock" onclick="toggleLock('${e.id}',true)">锁定</button>`;
+            }
             html += `<button class="btn-del" onclick="remove('${e.id}')">删除</button></td></tr>`;
         });
         html += '</table>';
@@ -133,15 +142,14 @@ async function add() {
     load();
 }
 
-async function remove(id) {
-    if (!confirm('确定删除 ' + id + ' ?')) return;
-    await api('POST', '/api/remove', JSON.stringify({ id }));
+async function toggleLock(id, lock) {
+    await api('POST', '/api/' + (lock ? 'lock' : 'unlock'), JSON.stringify({ id }));
     load();
 }
 
-async function expireNow(id) {
-    if (!confirm('确定将 ' + id + ' 标记为过期？')) return;
-    await api('POST', '/api/expire', JSON.stringify({ id }));
+async function remove(id) {
+    if (!confirm('确定删除 ' + id + ' ?')) return;
+    await api('POST', '/api/remove', JSON.stringify({ id }));
     load();
 }
 

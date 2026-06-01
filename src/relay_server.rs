@@ -660,9 +660,10 @@ async fn api_server(port: u16, token: String) {
                         ("GET", "/api/list") => {
                             let wl = WHITELIST.read().await;
                             let entries: Vec<String> = wl.iter().map(|(id, e)| {
-                                format!("{{\"id\":\"{}\",\"created_at\":{},\"expire_at\":{},\"note\":\"{}\"}}",
+                                format!("{{\"id\":\"{}\",\"created_at\":{},\"expire_at\":{},\"locked\":{},\"note\":\"{}\"}}",
                                     id, e.created_at,
                                     e.expire_at.map(|t| t.to_string()).unwrap_or("null".into()),
+                                    e.locked,
                                     e.note.replace('\"', "\\\""))
                             }).collect();
                             let json = format!("[{}]", entries.join(","));
@@ -676,6 +677,7 @@ async fn api_server(port: u16, token: String) {
                                     created_at: crate::common::now(),
                                     expire_at: expire,
                                     note,
+                                    locked: false,
                                 };
                                 WHITELIST.write().await.insert(id, entry);
                                 sync_whitelist_file().await;
@@ -704,10 +706,21 @@ async fn api_server(port: u16, token: String) {
                                 stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await.ok();
                             }
                         }
-                        ("POST", "/api/expire") => {
+                        ("POST", "/api/lock") => {
                             if let Some(id) = extract_json_id(&req) {
                                 WHITELIST.write().await.get_mut(&id).map(|e| {
-                                    e.expire_at = Some(1); // 1970 = expired
+                                    e.locked = true;
+                                });
+                                sync_whitelist_file().await;
+                                stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nok").await.ok();
+                            } else {
+                                stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await.ok();
+                            }
+                        }
+                        ("POST", "/api/unlock") => {
+                            if let Some(id) = extract_json_id(&req) {
+                                WHITELIST.write().await.get_mut(&id).map(|e| {
+                                    e.locked = false;
                                 });
                                 sync_whitelist_file().await;
                                 stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nok").await.ok();

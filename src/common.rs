@@ -165,6 +165,8 @@ pub struct WhitelistEntry {
     pub expire_at: Option<u64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    #[serde(default)]
+    pub locked: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -211,7 +213,7 @@ pub fn load_whitelist(path: &str) -> Whitelist {
                         } else { (line.to_owned(), None) }
                     } else { (line.to_owned(), None) };
                     if !id.is_empty() {
-                        whitelist.insert(id, WhitelistEntry { created_at: now, expire_at: expire, note: String::new() });
+                        whitelist.insert(id, WhitelistEntry { created_at: now, expire_at: expire, note: String::new(), locked: false });
                     }
                 }
             }
@@ -236,7 +238,7 @@ pub fn save_whitelist(path: &str, whitelist: &Whitelist) {
 pub fn check_whitelist(whitelist: &Whitelist, id: &str) -> bool {
     match whitelist.get(id) {
         None => false,
-        Some(e) => e.expire_at.map_or(true, |exp| exp > now()),
+        Some(e) => !e.locked && e.expire_at.map_or(true, |exp| exp > now()),
     }
 }
 
