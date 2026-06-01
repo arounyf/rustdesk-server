@@ -699,7 +699,8 @@ async fn api_server(port: u16, token: String) {
                             if let Some((id, expire, _)) = extract_add_params(&req) {
                                 WHITELIST.write().await.get_mut(&id).map(|e| {
                                     if let Some(days) = expire {
-                                        e.expire_at = Some(crate::common::now() + days * 86400);
+                                        let base = e.expire_at.filter(|t| *t > 1).unwrap_or_else(|| crate::common::now());
+                                        e.expire_at = Some(base + days * 86400);
                                     } else {
                                         e.expire_at = None; // never expires
                                     }
